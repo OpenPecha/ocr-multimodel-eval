@@ -1,0 +1,6 @@
+__pycache__
+venv
+.venv
+.env
+
+google_vision_key.json
