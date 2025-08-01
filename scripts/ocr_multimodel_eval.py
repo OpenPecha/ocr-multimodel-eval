@@ -27,6 +27,8 @@ load_dotenv()
 
 # Initialize Google Vision client
 try:
+    # Set the path to the service account key file
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '../google_vision_key.json'
     vision_client = vision.ImageAnnotatorClient()
     logging.info("Google Vision client initialized successfully")
 except Exception as e:
@@ -219,8 +221,13 @@ class OCRMultiModelEvaluator:
             filename = os.path.basename(image_path)
             image_name_without_ext = os.path.splitext(filename)[0]
             
-            # Create CSV filename with model name and image filename
-            csv_filename = f"{model_name}_{image_name_without_ext}.csv"
+            # Create model-specific output directory
+            output_dir = os.path.join("../data/script_inferenced", model_name)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Create CSV filename with just the image filename (no model prefix since it's in model folder)
+            csv_filename = f"{image_name_without_ext}.csv"
+            csv_path = os.path.join(output_dir, csv_filename)
             
             # Prepare data for CSV with proper Tibetan text handling
             inference_text = result.get('text', '')
@@ -240,20 +247,20 @@ class OCRMultiModelEvaluator:
             }
             
             # Check if CSV file exists
-            file_exists = os.path.isfile(csv_filename)
+            file_exists = os.path.isfile(csv_path)
             
             # Write to CSV with UTF-8 BOM for better Excel compatibility
-            with open(csv_filename, 'a', newline='', encoding='utf-8-sig') as csvfile:
+            with open(csv_path, 'a', newline='', encoding='utf-8-sig') as csvfile:
                 fieldnames = ['image_filename', 'inference_result', 'model_used', 'timestamp', 'error']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
                 
                 # Write header if file is new
                 if not file_exists:
                     writer.writeheader()
-                    logging.info(f"Created new CSV file with UTF-8 BOM: {csv_filename}")
+                    logging.info(f"Created new CSV file with UTF-8 BOM: {csv_path}")
                 
                 writer.writerow(csv_data)
-                logging.info(f"Saved Tibetan text result to CSV: {csv_filename}")
+                logging.info(f"Saved result to CSV: {csv_path}")
                 
         except Exception as e:
             logging.error(f"Error saving to CSV: {e}")
@@ -287,7 +294,73 @@ class OCRMultiModelEvaluator:
         logging.info(f"Batch processing completed for model: {model_name}")
         return results
     
-    def process_multimodel_images(self, model_name: str, lang_hint: Optional[str] = None, images_folder: str = "multimodel-images") -> list:
+    def combine_csv_files(self, model_name: str) -> str:
+        """Combine all individual CSV files for a model into one consolidated CSV file.
+        
+        Args:
+            model_name: Name of the model to combine CSV files for
+            
+        Returns:
+            Path to the combined CSV file
+        """
+        try:
+            # Define paths
+            model_dir = os.path.join("../data/script_inferenced", model_name)
+            combined_csv_path = os.path.join(model_dir, f"{model_name}_combined.csv")
+            
+            if not os.path.exists(model_dir):
+                logging.warning(f"Model directory not found: {model_dir}")
+                return ""
+            
+            # Get all CSV files in the model directory (excluding any existing combined file)
+            csv_files = []
+            for filename in os.listdir(model_dir):
+                if filename.endswith('.csv') and not filename.endswith('_combined.csv'):
+                    csv_files.append(os.path.join(model_dir, filename))
+            
+            if not csv_files:
+                logging.warning(f"No individual CSV files found in {model_dir}")
+                return ""
+            
+            # Sort files naturally (img_1.csv, img_2.csv, etc.)
+            import re
+            def natural_sort_key(path):
+                filename = os.path.basename(path)
+                numbers = re.findall(r'\d+', filename)
+                return [int(num) if num.isdigit() else num for num in numbers] if numbers else [filename]
+            
+            csv_files.sort(key=natural_sort_key)
+            
+            # Combine all CSV files
+            combined_data = []
+            fieldnames = ['image_filename', 'inference_result', 'model_used', 'timestamp', 'error']
+            
+            for csv_file in csv_files:
+                try:
+                    with open(csv_file, 'r', encoding='utf-8-sig') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            combined_data.append(row)
+                except Exception as e:
+                    logging.error(f"Error reading {csv_file}: {e}")
+                    continue
+            
+            # Write combined CSV file
+            with open(combined_csv_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
+                writer.writeheader()
+                writer.writerows(combined_data)
+            
+            logging.info(f"Combined {len(csv_files)} CSV files into: {combined_csv_path}")
+            logging.info(f"Total rows in combined file: {len(combined_data)}")
+            
+            return combined_csv_path
+            
+        except Exception as e:
+            logging.error(f"Error combining CSV files: {e}")
+            return ""
+    
+    def process_multimodel_images(self, model_name: str, lang_hint: Optional[str] = None, images_folder: str = "../data/images") -> list:
         """Process all images in the multimodel-images folder with the specified model.
         
         Args:
@@ -307,6 +380,16 @@ class OCRMultiModelEvaluator:
                 if any(filename.lower().endswith(ext) for ext in image_extensions):
                     image_path = os.path.join(images_folder, filename)
                     image_files.append(image_path)
+            
+            # Sort files to ensure proper order (img_1, img_2, img_3, etc.)
+            import re
+            def natural_sort_key(path):
+                filename = os.path.basename(path)
+                # Extract numbers from filename for proper sorting
+                numbers = re.findall(r'\d+', filename)
+                return [int(num) if num.isdigit() else num for num in numbers] if numbers else [filename]
+            
+            image_files.sort(key=natural_sort_key)
             
             if not image_files:
                 logging.warning(f"No image files found in {images_folder}")
@@ -334,18 +417,48 @@ def main():
     print("OCR Multi-Model Evaluator")
     print("Supported models:", list(SUPPORTED_MODELS.keys()))
     
-    # Example: Run OCR on a single image with a specific model
-    # result = evaluator.run_ocr("multimodel-images/img_1.jpg", "google_vision", lang_hint="bo")
+    # -----Example: Run OCR on a single image with a specific model-------
+
+    # result = evaluator.run_ocr("../data/images/img_7.jpg", "gemini_2_0_flash_lite", lang_hint=None, save_to_csv=True)
     # print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    # -----------------------------------------------------------------
+
+    # ***********Get all Gemini models (exclude models of choice)***********
+
+    # gemini_models = [model for model in SUPPORTED_MODELS.keys() if model != 'google_vision' and model != 'gemini_2_5_pro']
+    # print(f"\nProcessing with Gemini models: {gemini_models}")
     
-    # Example: Process all images in multimodel-images folder
-    results = evaluator.process_multimodel_images("gemini_2_5_pro", lang_hint=None, images_folder="multimodel-images")
-    print(f"Processed {len(results)} images from multimodel-images folder")
+    # Process all images with each Gemini model
+    # for i, model_name in enumerate(gemini_models, 1):
+    #     print(f"\n{'='*60}")
+    #     print(f"Processing with model {i}/{len(gemini_models)}: {model_name}")
+    #     print(f"{'='*60}")
+        
+    #     # Process all images in the folder
+    #     results = evaluator.process_multimodel_images(model_name, lang_hint=None, images_folder="../data/images")
+    #     print(f"Processed {len(results)} images with {model_name}")
+        
+    #     # Combine all individual CSV files into one consolidated file
+    #     combined_csv_path = evaluator.combine_csv_files(model_name)
+    #     if combined_csv_path:
+    #         print(f"Combined CSV file created: {combined_csv_path}")
+    #     else:
+    #         print(f"Failed to create combined CSV file for {model_name}")
     
-    # Example: Process specific images
-    # image_list = ["multimodel-images/img_1.jpg", "multimodel-images/img_2.png"]
-    # results = evaluator.process_batch_images(image_list, "google_vision", lang_hint="bo")
+    # print(f"\n{'='*60}")
+    # print(f"EVALUATION COMPLETE! Processed all {len(gemini_models)} Gemini models.")
+    # print(f"Results saved in: data/script_inferenced/")
+    # print(f"{'='*60}")
+    
+    # *************************************************************
+
+    # -------------- Example: Process specific images --------------
+    # image_list = ["../data/images/img_1.jpg", "../data/images/img_2.png", "../data/images/img_3.png", "../data/images/img_4.jpg", "../data/images/img_5.png", "../data/images/img_6.jpg", "../data/images/img_7.jpg"]
+    # results = evaluator.process_batch_images(image_list, "google_vision", lang_hint=None)
     # print(f"Processed {len(results)} specific images")
+    evaluator.combine_csv_files("google_vision")
+    # -----------------------------------------------------------------
 
 
 if __name__ == "__main__":
