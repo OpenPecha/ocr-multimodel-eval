@@ -7,7 +7,7 @@ This folder contains the output of the CER evaluation process. The CER scores ar
 `script_inferenced_2/script_inferenced_2_txt` contains the output of the script inference run using the following prompt:
 
 ```
-prompt = """ Please OCR and extract all the main text from this file, be as accurate as possible. Make use of your specific knowledge of Tibetan to ensure accuracy. Don't use markdown in the output. """
+prompt = """ You are an absolute expert on Tibetan. Please OCR and extract all the main text from this file, be as accurate as possible. Make use of your specific knowledge of Tibetan to ensure accuracy. Don't use markdown in the output. """
 ```
 
 ## File Format
