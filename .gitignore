@@ -4,3 +4,5 @@ venv
 .env
 
 google_vision_key.json
+
+scripts/ocr_multimodel_eval.log

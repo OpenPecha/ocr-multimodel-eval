@@ -5,12 +5,9 @@ import csv
 from datetime import datetime
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
 from google.cloud import vision
 from google.cloud.vision import AnnotateImageResponse
-from PIL import Image
-from io import BytesIO
-import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -40,8 +37,7 @@ gemini_api_key = os.getenv('GEMINI_API_KEY')
 gemini_client = None
 if gemini_api_key:
     try:
-        genai.configure(api_key=gemini_api_key)
-        gemini_client = genai
+        gemini_client = genai.Client(api_key=gemini_api_key)
         logging.info("Gemini client initialized successfully")
     except Exception as e:
         logging.error(f"Failed to initialize Gemini client: {e}")
@@ -129,7 +125,7 @@ class OCRMultiModelEvaluator:
             }
     
     def gemini_ocr(self, image_path: str, model_name: str, lang_hint: Optional[str] = None) -> Dict[str, Any]:
-        """Perform OCR using Gemini models."""
+        """Perform OCR using Gemini models with retry logic."""
         try:
             if not self.gemini_client:
                 raise ValueError("Gemini client not initialized. Check GEMINI_API_KEY in environment variables")
@@ -140,31 +136,44 @@ class OCRMultiModelEvaluator:
             
             actual_model_name = SUPPORTED_MODELS[model_name]
             
-            # Load local image file
-            image = Image.open(image_path)
+            # Load image as raw bytes to preserve quality
+            with open(image_path, 'rb') as f:
+                image_bytes = f.read()
             
-            # Create prompt for OCR - very specific to get only raw Tibetan text
-            prompt = "Extract only the Tibetan text from this image. Return ONLY the raw Tibetan characters exactly as they appear in the image, with no English explanations, no formatting, no line numbers, no headers, and no additional commentary. Just the pure Tibetan text."
+            # Determine MIME type from file extension
+            image_path_lower = image_path.lower()
+            if image_path_lower.endswith(('.jpg', '.jpeg')):
+                mime_type = 'image/jpeg'
+            elif image_path_lower.endswith('.png'):
+                mime_type = 'image/png'
+            elif image_path_lower.endswith('.webp'):
+                mime_type = 'image/webp'
+            else:
+                # Default to JPEG if unknown
+                mime_type = 'image/jpeg'
+            
+            # Base prompt
+            prompt = """ Please OCR and extract all the main text from this file, be as accurate as possible. Make use of your specific knowledge of Tibetan to ensure accuracy. Don't use markdown in the output. """
+            
             if lang_hint:
                 prompt += f" The text is in {lang_hint} language."
             
-            # Generate response using Gemini API
-            model = self.gemini_client.GenerativeModel(actual_model_name)
-            response = model.generate_content([prompt, image])
+            # Use the engineer's OCR approach with retry logic
+            text_result = self._ocr_image_with_retry(image_bytes, mime_type, prompt, actual_model_name)
             
             return {
                 "model": model_name,
-                "text": response.text.strip() if response.text else "",
+                "text": text_result if text_result != "ERROR" else "",
                 "raw_response": {
                     "candidates": [{
                         "content": {
                             "parts": [{
-                                "text": response.text
+                                "text": text_result
                             }]
                         }
-                    }] if response.text else []
+                    }] if text_result != "ERROR" else []
                 },
-                "error": None
+                "error": "OCR processing failed after retries" if text_result == "ERROR" else None
             }
             
         except Exception as e:
@@ -175,6 +184,47 @@ class OCRMultiModelEvaluator:
                 "raw_response": None,
                 "error": str(e)
             }
+    
+    def _ocr_image_with_retry(self, image_bytes: bytes, mime_type: str, prompt: str, model_name: str) -> str:
+        """Process a single image using Gemini model with retry logic (based on engineer's code)."""
+        import time
+        from google.genai.types import GenerateContentConfig, ThinkingConfig, Part
+        
+        temp = 1
+        for attempt in range(5):
+            try:
+                # Set thinking budget based on model requirements
+                thinking_budget = 128 if 'pro' in model_name.lower() else 0
+                
+                response = self.gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        prompt,
+                    ],
+                    config=GenerateContentConfig(
+                        system_instruction="You are an absolute expert on Tibetan.",
+                        temperature=temp,
+                        max_output_tokens=4000,
+                        thinking_config=ThinkingConfig(thinking_budget=thinking_budget)
+                    )
+                )
+                print("Got Response")
+                if response.text is not None:
+                    return response.text.strip()
+                else:
+                    print(f"[OCR_IMAGE] Attempt {attempt+1}, response.text is None")
+                    temp += 0.2
+                    time.sleep(3)
+                    continue
+                    
+            except Exception as e:
+                temp += 0.2
+                print(f"[OCR_IMAGE] Attempt {attempt+1}, error: {e}")
+                time.sleep(3)
+                continue
+                
+        return "ERROR"
     
     def run_ocr(self, image_path: str, model_name: str, lang_hint: Optional[str] = None, save_to_csv: bool = True) -> Dict[str, Any]:
         """Run OCR using the specified model.
@@ -222,7 +272,7 @@ class OCRMultiModelEvaluator:
             image_name_without_ext = os.path.splitext(filename)[0]
             
             # Create model-specific output directory
-            output_dir = os.path.join("../data/script_inferenced", model_name)
+            output_dir = os.path.join("../data/script_inferenced_2", model_name)
             os.makedirs(output_dir, exist_ok=True)
             
             # Create CSV filename with just the image filename (no model prefix since it's in model folder)
@@ -305,7 +355,7 @@ class OCRMultiModelEvaluator:
         """
         try:
             # Define paths
-            model_dir = os.path.join("../data/script_inferenced", model_name)
+            model_dir = os.path.join("../data/script_inferenced_2", model_name)
             combined_csv_path = os.path.join(model_dir, f"{model_name}_combined.csv")
             
             if not os.path.exists(model_dir):
@@ -426,30 +476,30 @@ def main():
 
     # ***********Get all Gemini models (exclude models of choice)***********
 
-    # gemini_models = [model for model in SUPPORTED_MODELS.keys() if model != 'google_vision' and model != 'gemini_2_5_pro']
-    # print(f"\nProcessing with Gemini models: {gemini_models}")
+    gemini_models = [model for model in SUPPORTED_MODELS.keys() if model != "google_vision"]
+    print(f"\nProcessing with Gemini models: {gemini_models}")
     
     # Process all images with each Gemini model
-    # for i, model_name in enumerate(gemini_models, 1):
-    #     print(f"\n{'='*60}")
-    #     print(f"Processing with model {i}/{len(gemini_models)}: {model_name}")
-    #     print(f"{'='*60}")
+    for i, model_name in enumerate(gemini_models, 1):
+        print(f"\n{'='*60}")
+        print(f"Processing with model {i}/{len(gemini_models)}: {model_name}")
+        print(f"{'='*60}")
         
-    #     # Process all images in the folder
-    #     results = evaluator.process_multimodel_images(model_name, lang_hint=None, images_folder="../data/images")
-    #     print(f"Processed {len(results)} images with {model_name}")
+        # Process all images in the folder
+        results = evaluator.process_multimodel_images(model_name, lang_hint=None, images_folder="../data/images")
+        print(f"Processed {len(results)} images with {model_name}")
         
-    #     # Combine all individual CSV files into one consolidated file
-    #     combined_csv_path = evaluator.combine_csv_files(model_name)
-    #     if combined_csv_path:
-    #         print(f"Combined CSV file created: {combined_csv_path}")
-    #     else:
-    #         print(f"Failed to create combined CSV file for {model_name}")
+        # Combine all individual CSV files into one consolidated file
+        combined_csv_path = evaluator.combine_csv_files(model_name)
+        if combined_csv_path:
+            print(f"Combined CSV file created: {combined_csv_path}")
+        else:
+            print(f"Failed to create combined CSV file for {model_name}")
     
-    # print(f"\n{'='*60}")
-    # print(f"EVALUATION COMPLETE! Processed all {len(gemini_models)} Gemini models.")
-    # print(f"Results saved in: data/script_inferenced/")
-    # print(f"{'='*60}")
+    print(f"\n{'='*60}")
+    print(f"EVALUATION COMPLETE! Processed all {len(gemini_models)} Gemini models.")
+    print(f"Results saved in: data/script_inferenced_2/")
+    print(f"{'='*60}")
     
     # *************************************************************
 
@@ -457,7 +507,7 @@ def main():
     # image_list = ["../data/images/img_1.jpg", "../data/images/img_2.png", "../data/images/img_3.png", "../data/images/img_4.jpg", "../data/images/img_5.png", "../data/images/img_6.jpg", "../data/images/img_7.jpg"]
     # results = evaluator.process_batch_images(image_list, "google_vision", lang_hint=None)
     # print(f"Processed {len(results)} specific images")
-    evaluator.combine_csv_files("google_vision")
+    # evaluator.combine_csv_files("google_vision")
     # -----------------------------------------------------------------
 
 

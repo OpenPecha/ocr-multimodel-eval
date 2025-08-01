@@ -197,8 +197,8 @@ def main():
     # paths
     project_root = Path(__file__).parent.parent
     ground_truth_path = project_root / "data" / "ground_truth" / "ground_truth_of_multi_models.txt"
-    inference_dir = project_root / "data" / "script_inferenced" / "script_inferenced_txt"
-    results_dir = project_root / "results_api_inferenced"
+    inference_dir = project_root / "data" / "script_inferenced_2" / "script_inferenced_2_txt"
+    results_dir = project_root / "results_api_inferenced_2"
     
     results_dir.mkdir(exist_ok=True)
     
